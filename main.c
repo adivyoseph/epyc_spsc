@@ -23,8 +23,8 @@
 
 
 typedef struct {
-    int msg;
-} msg_t __attribute__ ((aligned(CACHELINE_SIZE)));
+    int msg __attribute__ ((aligned(CACHELINE_SIZE)));
+} msg_t ;
 
 
 typedef struct {
@@ -51,12 +51,14 @@ typedef struct {
 } context_t;
 
 context_t ctxs[2];
-volatile g_sendStart = 0;
+volatile int g_sendStart = 0;
 
 void usage();
 void workq_init(spscq_t* wq, int size);
 int workq_write(spscq_t* wq, int msg);
 int workq_read(spscq_t* wq);
+void *send_func(void *p_arg);
+void *loopback_func(void *p_arg);
 
 int main(int argc, char **argv) {
     int opt;            //for commandline options
@@ -66,7 +68,7 @@ int main(int argc, char **argv) {
     cpu_set_t my_set;   // Define your cpu_set bit mask. 
     struct timespec start;
     struct timespec end;
-    double accum, accum1;
+    double accum;
     int x, rc;
 
      
@@ -197,14 +199,15 @@ void *send_func(void *p_arg){
     //wait for start command
     while (g_sendStart == 0){
       
-    }
+    };
 
     while (send_cnt < send_req){
       
        if (workq_write(this->spscqOut, send_cnt) > 0){
             send_cnt++;
         }
-    }
+    };
+    return NULL;
 }
 
 
@@ -236,4 +239,5 @@ void *loopback_func(void *p_arg){
        }
       
     }
+    return NULL;
 }
