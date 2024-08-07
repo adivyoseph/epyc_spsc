@@ -47,6 +47,7 @@ typedef struct {
     spscq_t*    spscqIn;
     spscq_t*    spscqOut;
     int         id;
+    int         count;
 } context_t;
 
 context_t ctxs[2];
@@ -66,7 +67,7 @@ int main(int argc, char **argv) {
     struct timespec start;
     struct timespec end;
     double accum, accum1;
-    int x;
+    int x, rc;
 
      
     while((opt = getopt(argc, argv, "ha:b:c:")) != -1) 
@@ -100,11 +101,13 @@ int main(int argc, char **argv) {
     ctxs[0].id = 0;
     ctxs[0].cpuAffinity = cpu_send;
     ctxs[0].spscqOut = &workqs[0];
+    ctxs[0].count = 20000;
 
     ctxs[1].id = 1;
     ctxs[1].cpuAffinity = cpu_loopback;
     ctxs[1].spscqIn = &workqs[0];
     ctxs[1].spscqOut = &workqs[1];
+    ctxs[1].count = 20000;
 
 
     CPU_ZERO(&my_set); 
@@ -118,14 +121,19 @@ int main(int argc, char **argv) {
     clock_gettime(CLOCK_REALTIME, &start);
     g_sendStart = 1;
     for (x = 0; x < 20000; x++) {
+        do {
+            rc = workq_read(&workqs[1]);
+        } while (rc < 0);
 
     }
-
 
     clock_gettime(CLOCK_REALTIME, &end);
 
     accum = ( end.tv_sec - start.tv_sec ) + (double)( end.tv_nsec - start.tv_nsec ) / (double)BILLION;
     printf( "%lf\n", accum );
+
+    pthread_join(ctxs[0].threadId, NULL);
+    pthread_join(ctxs[1].threadId, NULL);
     return 0;
 }
 
@@ -139,11 +147,93 @@ void workq_init(spscq_t* wq, int size){
 }
 
 int workq_write(spscq_t* wq, int msg) {
+    int nextWriteIndex = wq->writeIndex +1 ;
+    if(nextWriteIndex == wq->capacity){
+        nextWriteIndex = 0;
+    }
+    if(nextWriteIndex == wq->readCache){
+        wq->readCache = wq->readIndex;
+        if(nextWriteIndex == wq->readCache) return 0;
+    }
+    wq->msg[wq->writeIndex].msg = msg;
+    wq->writeIndex = nextWriteIndex;
 
-
+    return 1;
 }
 
 int workq_read(spscq_t* wq) {
+    int msg;
+    int nextReadIndex;
+    if(wq->readIndex== wq->writeCache){
+        wq->writeCache = wq->writeIndex;
+        if(wq->writeCache == wq->readIndex){
+            return -1;
+        }
+    }
+    msg = wq->msg[wq->readIndex].msg;
+    nextReadIndex = wq->readIndex + 1;
+    if(nextReadIndex == wq->capacity){
+        wq->readIndex = 0;
+    }
+    wq->capacity =nextReadIndex;
+    return msg;
+
+}
 
 
+void *send_func(void *p_arg){
+    context_t *this = (context_t *) p_arg;
+    //unsigned cpu, numa;
+    cpu_set_t my_set;        /* Define your cpu_set bit mask. */
+    int send_cnt = 0;
+    int send_req = this->count;
+    //printf("Thread_%d PID %d %d\n", this->id, getpid(), gettid());
+
+
+    CPU_ZERO(&my_set); 
+    CPU_SET(this->cpuAffinity, &my_set);
+    sched_setaffinity(0, sizeof(cpu_set_t), &my_set);
+    
+    //wait for start command
+    while (g_sendStart == 0){
+      
+    }
+
+    while (send_cnt < send_req){
+      
+       if (workq_write(this->spscqOut, send_cnt) > 0){
+            send_cnt++;
+        }
+    }
+}
+
+
+void *loopback_func(void *p_arg){
+    context_t *this = (context_t *) p_arg;
+    //unsigned cpu, numa;
+    cpu_set_t my_set;        /* Define your cpu_set bit mask. */
+    int msg, rc;
+    int send_cnt = 0;
+    int send_req = this->count;
+    
+    //printf("Thread_%d PID %d %d\n", this->id, getpid(), gettid());
+
+
+    CPU_ZERO(&my_set); 
+    CPU_SET(this->cpuAffinity, &my_set);
+    sched_setaffinity(0, sizeof(cpu_set_t), &my_set);
+    
+
+    while (send_cnt < send_req){
+      
+       msg = workq_read(this->spscqIn);
+       if (msg >= 0){
+        do {
+            rc = workq_write(this->spscqOut, msg);
+        } while (rc > 0);
+        send_cnt++;
+
+       }
+      
+    }
 }
