@@ -1,6 +1,6 @@
 project('spsc','c')
 
-add_global_arguments('-O2', language : 'c')
+add_global_arguments('-O0', language : 'c')
 
 src_files = ['main.c']
 

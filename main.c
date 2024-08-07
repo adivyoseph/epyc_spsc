@@ -20,10 +20,11 @@
 #endif
 #define FIFO_DEPTH_MAX 1024
 #define BILLION  1000000000L;
+#define SEND_CNT 10
 
 
 typedef struct {
-    int msg __attribute__ ((aligned(CACHELINE_SIZE)));
+    int msg;// __attribute__ ((aligned(CACHELINE_SIZE)));
 } msg_t ;
 
 
@@ -33,7 +34,7 @@ typedef struct {
     int readCache  __attribute__ ((aligned(CACHELINE_SIZE)));
     int readIndex __attribute__ ((aligned(CACHELINE_SIZE)));
     int writeCache  __attribute__ ((aligned(CACHELINE_SIZE)));
-    int pad __attribute__ ((aligned(CACHELINE_SIZE)));
+    int id __attribute__ ((aligned(CACHELINE_SIZE)));
     msg_t msg[FIFO_DEPTH_MAX+ 2] __attribute__ ((aligned(CACHELINE_SIZE)));
 
 } spscq_t __attribute__ ((aligned(CACHELINE_SIZE)));
@@ -54,7 +55,7 @@ context_t ctxs[2];
 volatile int g_sendStart = 0;
 
 void usage();
-void workq_init(spscq_t* wq, int size);
+void workq_init(spscq_t* wq, int size,int id);
 int workq_write(spscq_t* wq, int msg);
 int workq_read(spscq_t* wq);
 void *send_func(void *p_arg);
@@ -81,10 +82,18 @@ int main(int argc, char **argv) {
             return 0;
             break;
        
-       case 'a':
+        case 'a':
             cpu_cli = atoi(optarg);
             //printf("cpu_cli %d\n", cpu_cli); 
             break; 
+        case 'b':
+            cpu_send = atoi(optarg);
+            //printf("cpu_cli %d\n", cpu_cli); 
+            break;  
+        case 'c':
+            cpu_loopback = atoi(optarg);
+            //printf("cpu_cli %d\n", cpu_cli); 
+            break;        
 
 
         default:
@@ -96,20 +105,20 @@ int main(int argc, char **argv) {
     printf("cpu_send     %d\n", cpu_send); 
     printf("cpu_loopback %d\n", cpu_loopback); 
     
-    workq_init(&workqs[0], 512);
-    workq_init(&workqs[1], 512);
+    workq_init(&workqs[0], 512, 0);
+    workq_init(&workqs[1], 512, 1);
 
     //thread init
     ctxs[0].id = 0;
     ctxs[0].cpuAffinity = cpu_send;
     ctxs[0].spscqOut = &workqs[0];
-    ctxs[0].count = 20000;
+    ctxs[0].count = SEND_CNT;
 
     ctxs[1].id = 1;
     ctxs[1].cpuAffinity = cpu_loopback;
     ctxs[1].spscqIn = &workqs[0];
     ctxs[1].spscqOut = &workqs[1];
-    ctxs[1].count = 20000;
+    ctxs[1].count = SEND_CNT;
 
 
     CPU_ZERO(&my_set); 
@@ -122,11 +131,11 @@ int main(int argc, char **argv) {
 
     clock_gettime(CLOCK_REALTIME, &start);
     g_sendStart = 1;
-    for (x = 0; x < 20000; x++) {
+    for (x = 0; x < SEND_CNT; x++) {
         do {
             rc = workq_read(&workqs[1]);
         } while (rc < 0);
-
+        //printf("rx %d msg %d\n", x, rc);
     }
 
     clock_gettime(CLOCK_REALTIME, &end);
@@ -144,8 +153,9 @@ void usage(){
 }
 
 
-void workq_init(spscq_t* wq, int size){
+void workq_init(spscq_t* wq, int size, int id){
     wq->capacity = size;
+    wq->id = id;
 }
 
 int workq_write(spscq_t* wq, int msg) {
@@ -158,6 +168,7 @@ int workq_write(spscq_t* wq, int msg) {
         if(nextWriteIndex == wq->readCache) return 0;
     }
     wq->msg[wq->writeIndex].msg = msg;
+    //printf("workq_write_%d [%d]msg %d\n", wq->id, wq->writeIndex, wq->msg[wq->writeIndex].msg);
     wq->writeIndex = nextWriteIndex;
 
     return 1;
@@ -173,11 +184,12 @@ int workq_read(spscq_t* wq) {
         }
     }
     msg = wq->msg[wq->readIndex].msg;
+    //printf("workq_read_%d [%d]msg %d\n", wq->id, wq->readIndex, wq->msg[wq->readIndex].msg);
     nextReadIndex = wq->readIndex + 1;
     if(nextReadIndex == wq->capacity){
         wq->readIndex = 0;
     }
-    wq->capacity =nextReadIndex;
+    wq->readIndex =nextReadIndex;
     return msg;
 
 }
@@ -189,7 +201,7 @@ void *send_func(void *p_arg){
     cpu_set_t my_set;        /* Define your cpu_set bit mask. */
     int send_cnt = 0;
     int send_req = this->count;
-    //printf("Thread_%d PID %d %d\n", this->id, getpid(), gettid());
+    printf("Thread_%d PID %d %d\n", this->id, getpid(), gettid());
 
 
     CPU_ZERO(&my_set); 
@@ -200,11 +212,13 @@ void *send_func(void *p_arg){
     while (g_sendStart == 0){
       
     };
-
+    printf("Thread_%d started\n", this->id);
     while (send_cnt < send_req){
       
        if (workq_write(this->spscqOut, send_cnt) > 0){
+            // printf("send msg %d\n", send_cnt);
             send_cnt++;
+            
         }
     };
     return NULL;
@@ -219,23 +233,24 @@ void *loopback_func(void *p_arg){
     int send_cnt = 0;
     int send_req = this->count;
     
-    //printf("Thread_%d PID %d %d\n", this->id, getpid(), gettid());
+    printf("Thread_%d PID %d %d\n", this->id, getpid(), gettid());
 
 
     CPU_ZERO(&my_set); 
     CPU_SET(this->cpuAffinity, &my_set);
     sched_setaffinity(0, sizeof(cpu_set_t), &my_set);
     
-
+    printf("Thread_%d started\n", this->id);
     while (send_cnt < send_req){
       
        msg = workq_read(this->spscqIn);
        if (msg >= 0){
+       // printf("lb %d msg %d\n", send_cnt, msg);
         do {
             rc = workq_write(this->spscqOut, msg);
-        } while (rc > 0);
+        } while (rc <= 0);
         send_cnt++;
-
+        //printf("lb-> %d\n", send_cnt);
        }
       
     }
