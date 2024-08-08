@@ -70,10 +70,11 @@ int main(int argc, char **argv) {
     struct timespec start;
     struct timespec end;
     double accum;
-    int x, rc;
+    int rc, rx_cnt, tx_cnt;
+    int loops = 10;
 
      
-    while((opt = getopt(argc, argv, "ha:b:c:")) != -1) 
+    while((opt = getopt(argc, argv, "ha:b:c:l:")) != -1) 
     { 
         switch(opt) 
         { 
@@ -94,7 +95,10 @@ int main(int argc, char **argv) {
             cpu_loopback = atoi(optarg);
             //printf("cpu_cli %d\n", cpu_cli); 
             break;        
-
+        case 'l':
+            loops = atoi(optarg);
+            //printf("cpu_cli %d\n", cpu_cli); 
+            break;
 
         default:
             return 1;
@@ -102,7 +106,7 @@ int main(int argc, char **argv) {
         }
     }
     printf("cpu_cli      %d\n", cpu_cli); 
-    printf("cpu_send     %d\n", cpu_send); 
+    //printf("cpu_send     %d\n", cpu_send); 
     printf("cpu_loopback %d\n", cpu_loopback); 
     
     workq_init(&workqs[0], 512, 0);
@@ -112,38 +116,53 @@ int main(int argc, char **argv) {
     ctxs[0].id = 0;
     ctxs[0].cpuAffinity = cpu_send;
     ctxs[0].spscqOut = &workqs[0];
-    ctxs[0].count = SEND_CNT;
+    ctxs[0].count = loops;
 
     ctxs[1].id = 1;
     ctxs[1].cpuAffinity = cpu_loopback;
     ctxs[1].spscqIn = &workqs[0];
     ctxs[1].spscqOut = &workqs[1];
-    ctxs[1].count = SEND_CNT;
+    ctxs[1].count = loops;
 
 
     CPU_ZERO(&my_set); 
     CPU_SET(cpu_cli, &my_set);
     sched_setaffinity(0, sizeof(cpu_set_t), &my_set);
    
-    pthread_create(&ctxs[0].threadId, NULL, send_func, (void *) &ctxs[0]);
+    //pthread_create(&ctxs[0].threadId, NULL, send_func, (void *) &ctxs[0]);
 
     pthread_create(&ctxs[1].threadId, NULL, loopback_func, (void *) &ctxs[1]);
 
     clock_gettime(CLOCK_REALTIME, &start);
     g_sendStart = 1;
+    /*
     for (x = 0; x < SEND_CNT; x++) {
         do {
-            rc = workq_read(&workqs[1]);
+            
         } while (rc < 0);
         //printf("rx %d msg %d\n", x, rc);
-    }
+    }*/
+
+   while(rx_cnt < loops){
+        if (tx_cnt < loops){            
+            if (workq_write(&workqs[0], tx_cnt) > 0){
+                 // printf("send msg %d\n", send_cnt);
+             tx_cnt++;
+            
+            }
+        }
+        rc = workq_read(&workqs[1]);
+        if(rc >= 0) rx_cnt++;
+        rc = workq_read(&workqs[1]);
+        if(rc >= 0) rx_cnt++;
+   }
 
     clock_gettime(CLOCK_REALTIME, &end);
 
     accum = ( end.tv_sec - start.tv_sec ) + (double)( end.tv_nsec - start.tv_nsec ) / (double)BILLION;
     printf( "%lf\n", accum );
 
-    pthread_join(ctxs[0].threadId, NULL);
+   // pthread_join(ctxs[0].threadId, NULL);
     pthread_join(ctxs[1].threadId, NULL);
     return 0;
 }
@@ -159,7 +178,8 @@ void workq_init(spscq_t* wq, int size, int id){
 }
 
 int workq_write(spscq_t* wq, int msg) {
-    int nextWriteIndex = wq->writeIndex +1 ;
+    int writeIndex = wq->writeIndex;
+    int nextWriteIndex = writeIndex +1 ;
     if(nextWriteIndex == wq->capacity){
         nextWriteIndex = 0;
     }
@@ -167,7 +187,7 @@ int workq_write(spscq_t* wq, int msg) {
         wq->readCache = wq->readIndex;
         if(nextWriteIndex == wq->readCache) return 0;
     }
-    wq->msg[wq->writeIndex].msg = msg;
+    wq->msg[writeIndex].msg = msg;
     //printf("workq_write_%d [%d]msg %d\n", wq->id, wq->writeIndex, wq->msg[wq->writeIndex].msg);
     wq->writeIndex = nextWriteIndex;
 
@@ -177,19 +197,21 @@ int workq_write(spscq_t* wq, int msg) {
 int workq_read(spscq_t* wq) {
     int msg;
     int nextReadIndex;
-    if(wq->readIndex== wq->writeCache){
+    int readIndex = wq->readIndex;
+    
+    if(readIndex == wq->writeCache){
         wq->writeCache = wq->writeIndex;
-        if(wq->writeCache == wq->readIndex){
+        if(wq->writeCache == readIndex){
             return -1;
         }
     }
-    msg = wq->msg[wq->readIndex].msg;
+    msg = wq->msg[readIndex].msg;
     //printf("workq_read_%d [%d]msg %d\n", wq->id, wq->readIndex, wq->msg[wq->readIndex].msg);
-    nextReadIndex = wq->readIndex + 1;
-    if(nextReadIndex == wq->capacity){
-        wq->readIndex = 0;
+    nextReadIndex = readIndex + 1;
+    if(nextReadIndex >= wq->capacity){
+        nextReadIndex = 0;
     }
-    wq->readIndex =nextReadIndex;
+    wq->readIndex = nextReadIndex;
     return msg;
 
 }
